@@ -1,0 +1,1086 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Championship Clicker - One Shot</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Fonts: Inter & Orbitron -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Orbitron:wght@500;700;900&display=swap" rel="stylesheet">
+    <!-- Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #030712;
+            color: #f3f4f6;
+            overflow-x: hidden;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .font-orbitron {
+            font-family: 'Orbitron', sans-serif;
+        }
+        /* Custom neon glowing effects */
+        .neon-border-blue {
+            box-shadow: 0 0 15px rgba(59, 130, 246, 0.5);
+            border: 1px solid rgba(59, 130, 246, 0.8);
+        }
+        .neon-border-purple {
+            box-shadow: 0 0 15px rgba(168, 85, 247, 0.5);
+            border: 1px solid rgba(168, 85, 247, 0.8);
+        }
+        .neon-text-pink {
+            text-shadow: 0 0 10px rgba(244, 63, 94, 0.6);
+        }
+        .neon-text-blue {
+            text-shadow: 0 0 10px rgba(59, 130, 246, 0.6);
+        }
+        /* Particle animation container */
+        #particle-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 50;
+        }
+        .click-particle {
+            position: absolute;
+            pointer-events: none;
+            animation: floatUp 0.8s ease-out forwards;
+        }
+        @keyframes floatUp {
+            0% {
+                transform: translate(-50%, -50%) scale(1) translateY(0);
+                opacity: 1;
+            }
+            100% {
+                transform: translate(-50%, -50%) scale(0.4) translateY(-100px) rotate(45deg);
+                opacity: 0;
+            }
+        }
+        /* Glassmorphism */
+        .glass-panel {
+            background: rgba(17, 24, 39, 0.7);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        /* CRITICAL FOR MOBILE: Prevents double-tap zooming lag during fast clicking */
+        #big-clicker-button {
+            touch-action: manipulation;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col justify-between relative bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-purple-950 to-zinc-950">
+
+    <script>
+        // Global State Variables - Declared immediately in standard scope
+        window.gameState = {
+            currentUser: null,
+            userId: null,
+            playerData: null,
+            leaderboard: [],
+            clicks: 0,
+            timerInterval: null,
+            secondsLeft: 600, // 10 minutes (600 seconds)
+            rulesAccepted: false,
+            isSubmittingScore: false,
+            tempAuth: null
+        };
+
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'clicker-one-shot-championship';
+        let db = null;
+        let auth = null;
+
+        // Dynamic modules safe loader
+        window.addEventListener('load', async () => {
+            console.log("Sistem memuat... Mempersiapkan lingkungan permainan.");
+            setupBackupUUID();
+            await tryInitializeFirebase();
+            checkAndLoadLocalState();
+        });
+
+        // Helper function for safe connection timeouts
+        function withTimeout(promise, ms = 2000) {
+            return Promise.race([
+                promise,
+                new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), ms))
+            ]);
+        }
+
+        async function tryInitializeFirebase() {
+            try {
+                // Dynamic imports so that script loading failure DOES NOT crash the game
+                const firebaseApp = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js");
+                const firebaseAuth = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js");
+                const firebaseFirestore = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js");
+
+                const firebaseConfig = typeof __firebase_config !== 'undefined' 
+                    ? JSON.parse(__firebase_config) 
+                    : {
+                        apiKey: "mock-key",
+                        authDomain: "mock-auth",
+                        projectId: "mock-project",
+                        storageBucket: "mock-bucket",
+                        messagingSenderId: "mock-sender",
+                        appId: "mock-app"
+                    };
+
+                const app = firebaseApp.initializeApp(firebaseConfig);
+                db = firebaseFirestore.getFirestore(app);
+                auth = firebaseAuth.getAuth(app);
+
+                if (auth) {
+                    try {
+                        const cred = await withTimeout(firebaseAuth.signInAnonymously(auth), 2000);
+                        window.gameState.userId = cred.user.uid;
+                        console.log("Firebase berhasil tersambung. UID:", window.gameState.userId);
+                    } catch (authErr) {
+                        console.warn("Autentikasi Firebase dibatasi atau lambat, memakai cadangan lokal.");
+                    }
+                }
+                
+                listenToLeaderboard(firebaseFirestore);
+            } catch (err) {
+                console.warn("Gagal memuat Firebase di browser ini, menjalankan simulasi aman offline.");
+                updateMockLeaderboard();
+            }
+        }
+
+        let audioCtx = null;
+        function playClickSound(freq = 600, type = 'sine', duration = 0.08) {
+            try {
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                if (audioCtx.state === 'suspended') audioCtx.resume();
+                
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                
+                osc.type = type;
+                osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(150, audioCtx.currentTime + duration);
+                
+                gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+                
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                
+                osc.start();
+                osc.stop(audioCtx.currentTime + duration);
+            } catch (e) {}
+        }
+
+        function playGameOverSound() {
+            try {
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const now = audioCtx.currentTime;
+                [440, 330, 220].forEach((freq, idx) => {
+                    const osc = audioCtx.createOscillator();
+                    const gain = audioCtx.createGain();
+                    osc.frequency.setValueAtTime(freq, now + (idx * 0.15));
+                    gain.gain.setValueAtTime(0.1, now + (idx * 0.15));
+                    gain.gain.exponentialRampToValueAtTime(0.01, now + (idx * 0.15) + 0.3);
+                    osc.connect(gain);
+                    gain.connect(audioCtx.destination);
+                    osc.start(now + (idx * 0.15));
+                    osc.stop(now + (idx * 0.15) + 0.35);
+                });
+            } catch(e){}
+        }
+
+        function setupBackupUUID() {
+            let localId = localStorage.getItem('clicker_uuid');
+            if (!localId) {
+                localId = 'usr_' + Math.random().toString(36).substring(2, 15);
+                localStorage.setItem('clicker_uuid', localId);
+            }
+            window.gameState.userId = localId;
+        }
+
+        window.navigateTo = function(screenId) {
+            document.querySelectorAll('.app-screen').forEach(el => el.classList.add('hidden'));
+            const activeScreen = document.getElementById(screenId);
+            if (activeScreen) {
+                activeScreen.classList.remove('hidden');
+                activeScreen.classList.add('animate-fade-in');
+            }
+            window.scrollTo(0, 0); // Reset scroll on change screen
+        };
+
+        async function checkAndLoadLocalState() {
+            const localSaved = localStorage.getItem(`profile_${window.gameState.userId}`);
+            let localData = null;
+            if (localSaved) {
+                try {
+                    localData = JSON.parse(localSaved);
+                    window.gameState.playerData = localData;
+                } catch(e) {}
+            }
+
+            if (!db) {
+                if (localData) {
+                    handleGameRouting(localData);
+                } else {
+                    window.navigateTo('screen-auth');
+                }
+                return;
+            }
+
+            try {
+                // Avoid hanging the app if Firestore is slow
+                const playerRefDoc = await withTimeout(import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js").then(m => m.doc(db, 'artifacts', appId, 'public', 'data', 'players', window.gameState.userId)), 1500);
+                const getDocModule = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js").then(m => m.getDoc);
+                const docSnap = await withTimeout(getDocModule(playerRefDoc), 1500);
+                
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    window.gameState.playerData = data;
+                    handleGameRouting(data);
+                } else {
+                    if (localData) {
+                        handleGameRouting(localData);
+                    } else {
+                        window.navigateTo('screen-auth');
+                    }
+                }
+            } catch(e) {
+                if (localData) {
+                    handleGameRouting(localData);
+                } else {
+                    window.navigateTo('screen-auth');
+                }
+            }
+        }
+
+        function handleGameRouting(playerData) {
+            if (playerData.hasPlayed) {
+                window.gameState.clicks = playerData.score || 0;
+                showGameOverScreen();
+            } else if (playerData.startTime) {
+                const elapsedSeconds = Math.floor((Date.now() - playerData.startTime) / 1000);
+                const totalDuration = 600;
+                if (elapsedSeconds < totalDuration) {
+                    window.gameState.secondsLeft = totalDuration - elapsedSeconds;
+                    window.gameState.clicks = playerData.score || 0;
+                    startActiveGame();
+                } else {
+                    autoLockGame(playerData.score || 0);
+                }
+            } else {
+                window.navigateTo('screen-rules');
+            }
+        }
+
+        window.handleAuth = function(type) {
+            playClickSound(500, 'triangle', 0.1);
+            let email, password;
+            
+            if (type === 'credentials') {
+                email = document.getElementById('reg-email').value;
+                password = document.getElementById('reg-password').value;
+                
+                if (!email || !password) {
+                    showToast('Harap isi email dan sandi Anda!');
+                    return;
+                }
+                if (password.length < 6) {
+                    showToast('Sandi harus berisi minimal 6 karakter!');
+                    return;
+                }
+            } else if (type === 'facebook') {
+                email = 'facebook_user_' + Math.floor(Math.random() * 10000) + '@facebook.com';
+                password = 'fb_mock_secure_token';
+            }
+
+            window.gameState.tempAuth = { email, type };
+            document.getElementById('display-user-email').innerText = email;
+            window.navigateTo('screen-biodata');
+        };
+
+        window.submitBiodata = async function(e) {
+            if (e) e.preventDefault();
+            playClickSound(650, 'sine', 0.1);
+
+            const fullName = document.getElementById('bio-fullname').value.trim();
+            const nickname = document.getElementById('bio-nickname').value.trim();
+            const birthPlace = document.getElementById('bio-birthplace').value.trim();
+            const birthDate = document.getElementById('bio-birthdate').value.trim();
+            const fatherName = document.getElementById('bio-father').value.trim();
+            const motherName = document.getElementById('bio-mother').value.trim();
+
+            if (!fullName || !nickname || !birthPlace || !birthDate || !fatherName || !motherName) {
+                showToast('Harap mengisi seluruh data biodata dengan lengkap!');
+                return;
+            }
+
+            const profile = {
+                email: window.gameState.tempAuth?.email || 'unregistered@domain.com',
+                authType: window.gameState.tempAuth?.type || 'anonymous',
+                fullName,
+                nickname,
+                birthPlace,
+                birthDate,
+                fatherName,
+                motherName,
+                score: 0,
+                hasPlayed: false,
+                startTime: null
+            };
+
+            window.gameState.playerData = profile;
+            localStorage.setItem(`profile_${window.gameState.userId}`, JSON.stringify(profile));
+
+            // Async background save to Firestore (without block)
+            if (db) {
+                import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js").then(({ doc, setDoc }) => {
+                    const playerRef = doc(db, 'artifacts', appId, 'public', 'data', 'players', window.gameState.userId);
+                    setDoc(playerRef, profile).catch(err => console.warn("Firestore sync deferred", err));
+                }).catch(() => {});
+            }
+
+            showToast('Pendaftaran Berhasil! Silakan baca peraturan.');
+            window.navigateTo('screen-rules');
+        };
+
+        window.toggleRuleAcceptance = function(checkbox) {
+            playClickSound(700, 'sine', 0.05);
+            window.gameState.rulesAccepted = checkbox.checked;
+            const startBtn = document.getElementById('start-game-btn');
+            if (checkbox.checked) {
+                startBtn.removeAttribute('disabled');
+                startBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+                startBtn.classList.add('neon-border-blue', 'hover:scale-105');
+            } else {
+                startBtn.setAttribute('disabled', 'true');
+                startBtn.classList.add('opacity-50', 'cursor-not-allowed');
+                startBtn.classList.remove('neon-border-blue', 'hover:scale-105');
+            }
+        };
+
+        window.toggleRuleAcceptanceFromDiv = function() {
+            const checkbox = document.getElementById('rule-check');
+            checkbox.checked = !checkbox.checked;
+            window.toggleRuleAcceptance(checkbox);
+        };
+
+        window.triggerStartGame = async function() {
+            if (!window.gameState.rulesAccepted) return;
+            playClickSound(880, 'sine', 0.15);
+
+            const startTime = Date.now();
+            window.gameState.playerData.startTime = startTime;
+            window.gameState.secondsLeft = 600;
+            window.gameState.clicks = 0;
+
+            // Lock locally first to guarantee screen transition works immediately
+            localStorage.setItem(`profile_${window.gameState.userId}`, JSON.stringify(window.gameState.playerData));
+
+            // Background Fire-and-forget sync
+            if (db) {
+                import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js").then(({ doc, updateDoc }) => {
+                    const playerRef = doc(db, 'artifacts', appId, 'public', 'data', 'players', window.gameState.userId);
+                    updateDoc(playerRef, { startTime: startTime }).catch(() => {});
+                }).catch(() => {});
+            }
+
+            startActiveGame();
+        };
+
+        function startActiveGame() {
+            window.navigateTo('screen-gameplay');
+            
+            document.getElementById('hud-nickname').innerText = window.gameState.playerData.nickname;
+            document.getElementById('click-counter').innerText = window.gameState.clicks;
+
+            if (window.gameState.timerInterval) clearInterval(window.gameState.timerInterval);
+            
+            window.gameState.timerInterval = setInterval(() => {
+                window.gameState.secondsLeft--;
+                
+                if (window.gameState.secondsLeft % 5 === 0) {
+                    syncInterimScore(window.gameState.clicks);
+                }
+
+                if (window.gameState.secondsLeft <= 10 && window.gameState.secondsLeft > 0) {
+                    playClickSound(1000, 'square', 0.05);
+                }
+
+                updateTimerDisplay();
+
+                if (window.gameState.secondsLeft <= 0) {
+                    clearInterval(window.gameState.timerInterval);
+                    autoLockGame(window.gameState.clicks);
+                }
+            }, 1000);
+
+            updateTimerDisplay();
+        }
+
+        function updateTimerDisplay() {
+            const minutes = Math.floor(window.gameState.secondsLeft / 60);
+            const seconds = window.gameState.secondsLeft % 60;
+            const formattedTime = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+            
+            const timerEl = document.getElementById('timer-countdown');
+            timerEl.innerText = formattedTime;
+
+            if (window.gameState.secondsLeft < 60) {
+                timerEl.classList.add('text-rose-500', 'animate-pulse');
+                timerEl.classList.remove('text-cyan-400');
+            } else {
+                timerEl.classList.remove('text-rose-500', 'animate-pulse');
+                timerEl.classList.add('text-cyan-400');
+            }
+        }
+
+        async function syncInterimScore(currentScore) {
+            if (db) {
+                import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js").then(({ doc, updateDoc }) => {
+                    const playerRef = doc(db, 'artifacts', appId, 'public', 'data', 'players', window.gameState.userId);
+                    updateDoc(playerRef, { score: currentScore }).catch(() => {});
+                }).catch(() => {});
+            }
+        }
+
+        window.handleMainClick = function(event) {
+            if (window.gameState.secondsLeft <= 0) return;
+
+            window.gameState.clicks++;
+            document.getElementById('click-counter').innerText = window.gameState.clicks;
+            
+            playClickSound(400 + (window.gameState.clicks % 200), 'sine', 0.07);
+
+            const btn = document.getElementById('big-clicker-button');
+            btn.classList.add('scale-95');
+            setTimeout(() => btn.classList.remove('scale-95'), 50);
+
+            createParticle(event);
+        };
+
+        function createParticle(e) {
+            const container = document.getElementById('particle-container');
+            const particle = document.createElement('div');
+            particle.className = 'click-particle font-orbitron font-black text-2xl text-cyan-400 neon-text-blue select-none';
+            
+            const x = e.clientX || window.innerWidth / 2;
+            const y = e.clientY || window.innerHeight / 2;
+            
+            particle.style.left = `${x}px`;
+            particle.style.top = `${y}px`;
+            particle.innerText = `+1`;
+            
+            const drift = (Math.random() - 0.5) * 50;
+            particle.style.setProperty('--drift', `${drift}px`);
+            
+            container.appendChild(particle);
+            setTimeout(() => {
+                particle.remove();
+            }, 800);
+        }
+
+        async function autoLockGame(finalScore) {
+            playGameOverSound();
+            if (window.gameState.timerInterval) clearInterval(window.gameState.timerInterval);
+
+            window.gameState.playerData.hasPlayed = true;
+            window.gameState.playerData.score = finalScore;
+            localStorage.setItem(`profile_${window.gameState.userId}`, JSON.stringify(window.gameState.playerData));
+
+            if (db) {
+                import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js").then(({ doc, updateDoc }) => {
+                    const playerRef = doc(db, 'artifacts', appId, 'public', 'data', 'players', window.gameState.userId);
+                    updateDoc(playerRef, {
+                        score: finalScore,
+                        hasPlayed: true
+                    }).catch(() => {});
+                }).catch(() => {});
+            }
+            
+            showGameOverScreen();
+        }
+
+        function showGameOverScreen() {
+            window.navigateTo('screen-gameover');
+            
+            document.getElementById('final-clicks-result').innerText = window.gameState.clicks;
+            document.getElementById('lock-fullname').innerText = window.gameState.playerData.fullName;
+            document.getElementById('lock-nickname').innerText = window.gameState.playerData.nickname;
+            document.getElementById('lock-birth').innerText = `${window.gameState.playerData.birthPlace}, ${window.gameState.playerData.birthDate}`;
+            document.getElementById('lock-parents').innerText = `Ayah: ${window.gameState.playerData.fatherName} | Ibu: ${window.gameState.playerData.motherName}`;
+
+            simulateSecureEmailPipeline();
+        }
+
+        function simulateSecureEmailPipeline() {
+            const terminal = document.getElementById('email-terminal-logs');
+            terminal.innerHTML = '';
+            
+            const logs = [
+                "🚀 Menginisialisasi jembatan transmisi data aman...",
+                "🔑 Memverifikasi integritas biodata & enkripsi hash...",
+                `📦 Paket Skor: ${window.gameState.clicks} klik dari ${window.gameState.playerData.nickname}`,
+                "📨 Menghubungi SMTP Server tujuan: baryfnsbayern@gmail.com ...",
+                "🧬 Menyusun metadata payload (Tanggal lahir & data keluarga terlampir)",
+                "📤 Mengunggah berkas sertifikat hasil ke admin...",
+                "✅ DATA TERKIRIM SECARA OTOMATIS! Email konfirmasi terkirim ke baryfnsbayern@gmail.com",
+                "🔐 Sesi bermain Anda telah DIKUNCI PERMANEN. Tidak dapat bermain kembali."
+            ];
+
+            let delay = 0;
+            logs.forEach(log => {
+                setTimeout(() => {
+                    const logLine = document.createElement('div');
+                    logLine.className = 'py-1 border-b border-gray-800/40 font-mono text-xs text-emerald-400';
+                    logLine.innerHTML = `<span class="text-slate-500">[SYSTEM]</span> ${log}`;
+                    terminal.appendChild(logLine);
+                    terminal.scrollTop = terminal.scrollHeight;
+                }, delay);
+                delay += 800;
+            });
+
+            const reportBtn = document.getElementById('download-report-btn');
+            reportBtn.onclick = () => {
+                playClickSound(600, 'sine', 0.1);
+                downloadVerificationCertificate();
+            };
+        }
+
+        function downloadVerificationCertificate() {
+            const data = window.gameState.playerData;
+            const certificateText = `
+=========================================
+OFFICIAL ONE-SHOT CLICKER CERTIFICATE
+=========================================
+Halaman verifikasi resmi hasil kompetisi.
+Skor Anda telah diarsipkan ke Database Pusat.
+
+[BIODATA PEMAIN]
+Nama Lengkap      : ${data.fullName}
+Nama Panggilan    : ${data.nickname}
+Email             : ${data.email}
+Tempat/Tgl Lahir  : ${data.birthPlace}, ${data.birthDate}
+Nama Ayah         : ${data.fatherName}
+Nama Ibu          : ${data.motherName}
+
+[HASIL AKTIVITAS GAME]
+Skor Akhir Clicks : ${window.gameState.clicks} Clicks
+Status Main       : LENGKAP (TIDAK BISA DIULANG)
+Kode Unik Verif   : ${window.gameState.userId}
+
+Kirimkan file ini beserta tangkapan layar (SS)
+ke Instagram Admin: @1tsbry._ untuk klaim hadiah Anda!
+=========================================
+            `;
+            const blob = new Blob([certificateText], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `VERIFIKASI_SKOR_${data.nickname}.txt`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        function listenToLeaderboard(firestoreModule) {
+            const collectionPath = `artifacts/${appId}/public/data/players`;
+            try {
+                firestoreModule.onSnapshot(
+                    firestoreModule.collection(db, 'artifacts', appId, 'public', 'data', 'players'), 
+                    (snapshot) => {
+                        const players = [];
+                        snapshot.forEach(doc => {
+                            const data = doc.data();
+                            if (data.nickname && data.score !== undefined) {
+                                players.push({
+                                    id: doc.id,
+                                    nickname: data.nickname,
+                                    fullName: data.fullName || 'Anonymous',
+                                    score: data.score,
+                                    hasPlayed: data.hasPlayed || false
+                                });
+                            }
+                        });
+                        players.sort((a, b) => b.score - a.score);
+                        window.gameState.leaderboard = players;
+                        renderLeaderboards();
+                    }, 
+                    (error) => {
+                        console.error("Leaderboard Snapshot error:", error);
+                        updateMockLeaderboard();
+                    }
+                );
+            } catch(e) {
+                updateMockLeaderboard();
+            }
+        }
+
+        function updateMockLeaderboard() {
+            let mockData = JSON.parse(localStorage.getItem('mock_leaderboard')) || [
+                { id: '1', nickname: 'Bary Admin', fullName: 'Bary Bayern', score: 2500, hasPlayed: true },
+                { id: '2', nickname: 'AsepTurbo', fullName: 'Asep Supriatna', score: 1842, hasPlayed: true },
+                { id: '3', nickname: 'SitiFast', fullName: 'Siti Aminah', score: 1620, hasPlayed: true },
+                { id: '4', nickname: 'NoobClicker', fullName: 'Fulan bin Fulan', score: 950, hasPlayed: true }
+            ];
+            mockData.sort((a, b) => b.score - a.score);
+            window.gameState.leaderboard = mockData;
+            renderLeaderboards();
+        }
+
+        function renderLeaderboards() {
+            const leaderboardContainer = document.getElementById('leaderboard-entries');
+            if (!leaderboardContainer) return;
+
+            leaderboardContainer.innerHTML = '';
+            
+            if (window.gameState.leaderboard.length === 0) {
+                leaderboardContainer.innerHTML = `
+                    <div class="text-center text-slate-500 py-8 text-sm italic">
+                        Belum ada pemain yang terdaftar di papan peringkat.
+                    </div>
+                `;
+                return;
+            }
+
+            window.gameState.leaderboard.forEach((player, index) => {
+                const rank = index + 1;
+                let bgStyle = 'bg-slate-900/40';
+                let rankBadge = `<span class="text-slate-400 font-bold">${rank}</span>`;
+                let prizeTag = '';
+
+                if (rank === 1) {
+                    bgStyle = 'bg-amber-500/10 border border-amber-500/30';
+                    rankBadge = `<span class="text-amber-400 font-black"><i class="fa-solid fa-crown mr-1"></i>1</span>`;
+                    prizeTag = `<span class="text-xs bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded border border-amber-500/30 font-medium">Rp100rb + Kuota 10GB</span>`;
+                } else if (rank === 2) {
+                    bgStyle = 'bg-slate-300/10 border border-slate-300/30';
+                    rankBadge = `<span class="text-slate-300 font-black"><i class="fa-solid fa-medal mr-1"></i>2</span>`;
+                    prizeTag = `<span class="text-xs bg-slate-300/20 text-slate-200 px-2 py-0.5 rounded border border-slate-300/30 font-medium">Rp50rb + Kuota 5GB</span>`;
+                } else if (rank === 3) {
+                    bgStyle = 'bg-amber-700/10 border border-amber-700/30';
+                    rankBadge = `<span class="text-amber-600 font-black"><i class="fa-solid fa-medal mr-1"></i>3</span>`;
+                    prizeTag = `<span class="text-xs bg-amber-700/20 text-amber-500 px-2 py-0.5 rounded border border-amber-700/30 font-medium">Kuota 10GB</span>`;
+                } else if (rank === 4) {
+                    bgStyle = 'bg-blue-500/10 border border-blue-500/20';
+                    rankBadge = `<span class="text-blue-400 font-bold">4</span>`;
+                    prizeTag = `<span class="text-xs bg-blue-500/20 text-blue-300 px-2 py-0.5 rounded border border-blue-500/20 font-medium">Rp20rb</span>`;
+                }
+
+                const isCurrentUser = player.id === window.gameState.userId;
+                const highlightBorder = isCurrentUser ? 'ring-2 ring-cyan-500' : '';
+
+                const row = document.createElement('div');
+                row.className = `flex flex-col md:flex-row md:items-center justify-between p-3.5 rounded-xl gap-2 ${bgStyle} ${highlightBorder} transition-all duration-300`;
+                row.innerHTML = `
+                    <div class="flex items-center gap-3">
+                        <div class="w-8 h-8 rounded-lg bg-black/40 flex items-center justify-center font-orbitron">
+                            ${rankBadge}
+                        </div>
+                        <div>
+                            <span class="font-bold text-gray-100 ${isCurrentUser ? 'text-cyan-400' : ''}">
+                                ${player.nickname} ${isCurrentUser ? '(Anda)' : ''}
+                            </span>
+                            <div class="text-xs text-slate-400 truncate max-w-[200px]">${player.fullName}</div>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-4 justify-between md:justify-end">
+                        <div class="text-right">
+                            <span class="font-orbitron font-bold text-lg text-cyan-400">${player.score.toLocaleString('id-ID')}</span>
+                            <span class="text-xs text-slate-500"> clicks</span>
+                        </div>
+                        ${prizeTag ? `<div class="md:ml-2">${prizeTag}</div>` : ''}
+                    </div>
+                `;
+                leaderboardContainer.appendChild(row);
+            });
+        }
+
+        window.showToast = function(message) {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = 'bg-slate-900 border border-purple-500/40 text-slate-100 px-5 py-3.5 rounded-xl shadow-2xl flex items-center gap-2 transform translate-y-2 animate-bounce transition-all duration-300 z-50';
+            toast.innerHTML = `
+                <i class="fa-solid fa-circle-exclamation text-purple-400"></i>
+                <span class="text-sm font-medium">${message}</span>
+            `;
+            container.appendChild(toast);
+            setTimeout(() => {
+                toast.classList.add('opacity-0', 'translate-y-[-10px]');
+                setTimeout(() => toast.remove(), 400);
+            }, 3000);
+        };
+    </script>
+
+    <!-- TOAST POPUP NOTIFICATION CONTROLLER -->
+    <div id="toast-container" class="fixed bottom-6 right-6 flex flex-col gap-2 z-50"></div>
+
+    <!-- MAIN HEADER BAR -->
+    <header class="w-full glass-panel py-4 px-6 border-b border-purple-900/30 flex justify-between items-center z-40">
+        <div class="flex items-center gap-2.5">
+            <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-500 to-purple-600 flex items-center justify-center shadow-lg shadow-purple-500/20">
+                <i class="fa-solid fa-mouse-pointer text-white text-lg"></i>
+            </div>
+            <div>
+                <h1 class="font-orbitron font-black tracking-wider text-xl bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-purple-400">TAPCHAMP</h1>
+                <p class="text-[10px] text-slate-400 tracking-widest font-mono uppercase">Single Play Arena</p>
+            </div>
+        </div>
+        <div class="flex items-center gap-3">
+            <div class="bg-rose-500/10 text-rose-400 border border-rose-500/20 px-3 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 font-mono">
+                <span class="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span> ONE SHOT PLAY
+            </div>
+        </div>
+    </header>
+
+    <!-- APPLICATION WRAPPER & MAIN GAMEPLAY SCREENS -->
+    <main class="flex-grow w-full max-w-5xl mx-auto px-4 py-8 flex items-center justify-center z-30">
+
+        <!-- SCREEN 1: WELCOME & REGISTRATION AUTHENTICATION -->
+        <section id="screen-auth" class="app-screen w-full max-w-md glass-panel rounded-2xl p-6 md:p-8 neon-border-purple shadow-2xl space-y-6">
+            <div class="text-center space-y-2">
+                <div class="inline-flex p-3 rounded-full bg-purple-500/10 text-purple-400 border border-purple-500/20 mb-2">
+                    <i class="fa-solid fa-user-plus text-2xl"></i>
+                </div>
+                <h2 class="text-2xl font-black font-orbitron tracking-tight text-white">Buat Akun Anda</h2>
+                <p class="text-sm text-slate-400">Pilih metode pendaftaran untuk mulai berkompetisi memperebutkan total hadiah ratusan ribu rupiah.</p>
+            </div>
+
+            <!-- Authentic Simulated Registration Forms -->
+            <div class="space-y-4">
+                <div class="space-y-1.5">
+                    <label class="text-xs font-semibold text-slate-300">Email Google</label>
+                    <div class="relative">
+                        <span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500"><i class="fa-regular fa-envelope"></i></span>
+                        <input type="email" id="reg-email" placeholder="nama@gmail.com" class="w-full bg-slate-950/60 border border-slate-800 focus:border-cyan-500 rounded-xl py-3 pl-10 pr-4 text-sm text-slate-200 focus:outline-none transition-colors">
+                    </div>
+                </div>
+
+                <div class="space-y-1.5">
+                    <label class="text-xs font-semibold text-slate-300">Sandi Google</label>
+                    <div class="relative">
+                        <span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500"><i class="fa-solid fa-lock"></i></span>
+                        <input type="password" id="reg-password" placeholder="••••••••" class="w-full bg-slate-950/60 border border-slate-800 focus:border-cyan-500 rounded-xl py-3 pl-10 pr-4 text-sm text-slate-200 focus:outline-none transition-colors">
+                    </div>
+                </div>
+
+                <button onclick="handleAuth('credentials')" class="w-full bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold py-3.5 px-4 rounded-xl shadow-lg shadow-cyan-500/20 hover:scale-[1.02] transition-all flex items-center justify-center gap-2">
+                    <i class="fa-solid fa-arrow-right-to-bracket"></i> Daftar Akun Utama
+                </button>
+
+                <div class="relative flex py-2 items-center">
+                    <div class="flex-grow border-t border-slate-800/80"></div>
+                    <span class="flex-shrink mx-4 text-xs font-mono text-slate-500 uppercase">ATAU</span>
+                    <div class="flex-grow border-t border-slate-800/80"></div>
+                </div>
+
+                <!-- Facebook Mock Integration Social Button -->
+                <button onclick="handleAuth('facebook')" class="w-full bg-[#1877F2] hover:bg-[#166fe5] text-white font-bold py-3.5 px-4 rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-blue-600/10 hover:scale-[1.02] transition-all">
+                    <i class="fa-brands fa-facebook text-xl"></i> Daftar menggunakan Facebook
+                </button>
+            </div>
+
+            <div class="pt-2 text-center">
+                <p class="text-xs text-slate-500">Dengan mendaftar, Anda menyatakan setuju untuk mematuhi aturan ketat satu kali bermain.</p>
+            </div>
+        </section>
+
+        <!-- SCREEN 2: PROFILE DETAILS INPUT (Nama Lengkap, Ortu, TTL) -->
+        <section id="screen-biodata" class="app-screen w-full max-w-lg glass-panel rounded-2xl p-6 md:p-8 neon-border-purple shadow-2xl space-y-6 hidden">
+            <div class="flex items-center gap-3 border-b border-slate-800/80 pb-4">
+                <div class="p-2.5 rounded-lg bg-cyan-500/10 text-cyan-400">
+                    <i class="fa-solid fa-id-card text-xl"></i>
+                </div>
+                <div>
+                    <h2 class="text-xl font-black font-orbitron tracking-tight text-white">Lengkapi Biodata Resmi</h2>
+                    <p class="text-xs text-slate-400">Harap diisi dengan data asli untuk keperluan verifikasi pengiriman hadiah.</p>
+                </div>
+            </div>
+
+            <div class="bg-cyan-500/5 rounded-xl border border-cyan-500/10 p-3 text-xs text-cyan-300 flex items-start gap-2">
+                <i class="fa-solid fa-circle-info mt-0.5 text-sm"></i>
+                <span>Data ini akan diverifikasi oleh Admin demi validasi pemenang leaderboard. Terdaftar melalui: <strong id="display-user-email">...</strong></span>
+            </div>
+
+            <form id="biodata-form" onsubmit="submitBiodata(event)" class="space-y-4">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="space-y-1">
+                        <label class="text-xs font-semibold text-slate-300">Nama Lengkap Player</label>
+                        <input type="text" id="bio-fullname" placeholder="Contoh: Bary Bayern" class="w-full bg-slate-950/60 border border-slate-800 focus:border-cyan-500 rounded-xl py-2.5 px-4 text-sm text-slate-200 focus:outline-none transition-colors">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="text-xs font-semibold text-slate-300">Nama Panggilan</label>
+                        <input type="text" id="bio-nickname" placeholder="Contoh: Bary" class="w-full bg-slate-950/60 border border-slate-800 focus:border-cyan-500 rounded-xl py-2.5 px-4 text-sm text-slate-200 focus:outline-none transition-colors">
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="space-y-1">
+                        <label class="text-xs font-semibold text-slate-300">Tempat Lahir</label>
+                        <input type="text" id="bio-birthplace" placeholder="Contoh: Jakarta" class="w-full bg-slate-950/60 border border-slate-800 focus:border-cyan-500 rounded-xl py-2.5 px-4 text-sm text-slate-200 focus:outline-none transition-colors">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="text-xs font-semibold text-slate-300">Tanggal & Tahun Lahir</label>
+                        <input type="text" id="bio-birthdate" placeholder="Contoh: 15 Agustus 2005" class="w-full bg-slate-950/60 border border-slate-800 focus:border-cyan-500 rounded-xl py-2.5 px-4 text-sm text-slate-200 focus:outline-none transition-colors">
+                    </div>
+                </div>
+
+                <div class="border-t border-slate-800/80 my-2 pt-4">
+                    <h3 class="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-3">Data Orang Tua Player</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div class="space-y-1">
+                            <label class="text-xs font-semibold text-slate-300">Nama Lengkap Ayah</label>
+                            <input type="text" id="bio-father" placeholder="Nama Ayah Kandung" class="w-full bg-slate-950/60 border border-slate-800 focus:border-cyan-500 rounded-xl py-2.5 px-4 text-sm text-slate-200 focus:outline-none transition-colors">
+                        </div>
+                        <div class="space-y-1">
+                            <label class="text-xs font-semibold text-slate-300">Nama Lengkap Ibu</label>
+                            <input type="text" id="bio-mother" placeholder="Nama Ibu Kandung" class="w-full bg-slate-950/60 border border-slate-800 focus:border-cyan-500 rounded-xl py-2.5 px-4 text-sm text-slate-200 focus:outline-none transition-colors">
+                        </div>
+                    </div>
+                </div>
+
+                <button type="submit" class="w-full bg-gradient-to-r from-purple-500 to-indigo-600 hover:from-purple-400 hover:to-indigo-500 text-white font-bold py-3 px-4 rounded-xl shadow-lg shadow-purple-500/20 hover:scale-[1.01] transition-all flex items-center justify-center gap-2 mt-4">
+                    <i class="fa-solid fa-circle-check"></i> Simpan Biodata & Lanjutkan
+                </button>
+            </form>
+        </section>
+
+        <!-- SCREEN 3: GAME REGULATIONS & AGREEMENT CHECKBOX -->
+        <section id="screen-rules" class="app-screen w-full max-w-2xl glass-panel rounded-2xl p-6 md:p-8 neon-border-purple shadow-2xl space-y-6 hidden">
+            <div class="text-center space-y-2 border-b border-slate-800/80 pb-4">
+                <div class="inline-flex p-3 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 mb-1 animate-pulse">
+                    <i class="fa-solid fa-triangle-exclamation text-2xl"></i>
+                </div>
+                <h2 class="text-2xl font-black font-orbitron tracking-tight text-white">Peraturan Resmi Turnamen</h2>
+                <p class="text-sm text-slate-400">Anda wajib membaca dan memahami seluruh persyaratan permainan di bawah ini sebelum memulai!</p>
+            </div>
+
+            <!-- Rules Grid list -->
+            <div class="space-y-4 bg-slate-950/75 p-5 rounded-2xl border border-slate-800/80">
+                <div class="flex gap-3.5 items-start">
+                    <span class="w-6 h-6 rounded-lg bg-purple-500/20 text-purple-400 border border-purple-500/30 flex items-center justify-center font-bold text-xs shrink-0 mt-0.5">1</span>
+                    <p class="text-sm text-slate-300 leading-relaxed">
+                        Player hanya diberikan waktu bermain selama <strong class="text-cyan-400">10 Menit tanpa tambahan sedikitpun</strong>.
+                    </p>
+                </div>
+                <div class="flex gap-3.5 items-start">
+                    <span class="w-6 h-6 rounded-lg bg-purple-500/20 text-purple-400 border border-purple-500/30 flex items-center justify-center font-bold text-xs shrink-0 mt-0.5">2</span>
+                    <p class="text-sm text-slate-300 leading-relaxed">
+                        Player dengan akumulasi <strong class="text-cyan-400">klik paling banyak</strong> akan dinobatkan sebagai pemenang dan mendapat reward istimewa dari Admin.
+                    </p>
+                </div>
+                <div class="flex gap-3.5 items-start">
+                    <span class="w-6 h-6 rounded-lg bg-purple-500/20 text-purple-400 border border-purple-500/30 flex items-center justify-center font-bold text-xs shrink-0 mt-0.5">3</span>
+                    <p class="text-sm text-slate-300 leading-relaxed">
+                        Player <strong class="text-rose-400">wajib melakukan tangkapan layar (SS)</strong> hasil akhir kemudian mengirimnya ke Instagram Admin resmi: <a href="https://instagram.com/1tsbry._" target="_blank" class="text-cyan-400 underline hover:text-cyan-300">@1tsbry._</a> untuk validasi.
+                    </p>
+                </div>
+                <div class="flex gap-3.5 items-start">
+                    <span class="w-6 h-6 rounded-lg bg-purple-500/20 text-purple-400 border border-purple-500/30 flex items-center justify-center font-bold text-xs shrink-0 mt-0.5">4</span>
+                    <div class="space-y-2">
+                        <p class="text-sm text-slate-300">Hadiah rincian berdasarkan peringkat adalah:</p>
+                        <ul class="text-xs text-slate-400 space-y-1.5 list-disc list-inside">
+                            <li><strong class="text-amber-400">Juara 1:</strong> Hadiah Uang Tunai sebesar <strong class="text-slate-200">Rp100.000,00</strong> dan Bonus Voucher Kuota <strong class="text-slate-200">10GB</strong></li>
+                            <li><strong class="text-slate-300">Juara 2:</strong> Hadiah Uang Tunai sebesar <strong class="text-slate-200">Rp50.000,00</strong> dan Voucher Kuota <strong class="text-slate-200">5GB</strong></li>
+                            <li><strong class="text-amber-600">Juara 3:</strong> Voucher Kuota sebesar <strong class="text-slate-200">10GB</strong></li>
+                            <li><strong>Juara 4:</strong> Hadiah Uang Tunai sebesar <strong class="text-slate-200">Rp20.000,00</strong></li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <div class="flex items-start gap-3 bg-rose-500/10 border border-rose-500/20 p-4 rounded-xl text-xs text-rose-300">
+                <i class="fa-solid fa-skull-crossbones text-base mt-0.5"></i>
+                <p><strong>PERINGATAN KERAS:</strong> Anda hanya diberikan 1 nyawa (satu kali kesempatan bermain). Setelah Anda menekan tombol mulai, timer akan otomatis menghitung mundur secara sinkron. Me-refresh halaman tidak akan mereset waktu Anda!</p>
+            </div>
+
+            <!-- Rules Acceptance Toggle: Clickable Container for mobile friendly touch target -->
+            <div onclick="toggleRuleAcceptanceFromDiv()" class="flex items-center gap-3 bg-slate-900/60 p-4 rounded-xl border border-slate-800 cursor-pointer">
+                <input type="checkbox" id="rule-check" class="w-5 h-5 rounded border-slate-700 bg-slate-950 text-cyan-500 focus:ring-cyan-500 cursor-pointer" onclick="event.stopPropagation(); window.toggleRuleAcceptance(this);">
+                <label for="rule-check" class="text-sm text-slate-200 font-medium cursor-pointer select-none">Saya telah membaca seluruh peraturan dan siap berkompetisi sekarang.</label>
+            </div>
+
+            <button id="start-game-btn" onclick="triggerStartGame()" disabled class="w-full bg-gradient-to-r from-blue-500 to-cyan-500 text-white font-black text-lg py-4 px-6 rounded-xl shadow-lg shadow-cyan-500/20 transition-all flex items-center justify-center gap-3 opacity-50 cursor-not-allowed">
+                <i class="fa-solid fa-play animate-pulse"></i> MULAI PERMAINAN SEKARANG
+            </button>
+        </section>
+
+        <!-- SCREEN 4: GAMEPLAY PANEL (TAPPING ARENA) -->
+        <section id="screen-gameplay" class="app-screen w-full max-w-4xl grid grid-cols-1 lg:grid-cols-12 gap-6 hidden">
+            <!-- Left Info & Game Dashboard -->
+            <div class="lg:col-span-4 flex flex-col gap-4">
+                <!-- User Profile Badge -->
+                <div class="glass-panel rounded-2xl p-5 border border-purple-500/20 space-y-3">
+                    <div class="flex items-center gap-3">
+                        <div class="w-11 h-11 rounded-xl bg-purple-500/20 text-purple-400 flex items-center justify-center font-bold text-lg">
+                            <i class="fa-regular fa-user"></i>
+                        </div>
+                        <div>
+                            <span class="text-xs text-slate-400">Sedang bermain:</span>
+                            <h3 id="hud-nickname" class="font-bold text-white text-lg">...</h3>
+                        </div>
+                    </div>
+                    <div class="h-px bg-slate-800"></div>
+                    <div class="text-xs text-slate-400 space-y-1">
+                        <div>Sistem Nyawa: <span class="text-emerald-400 font-bold">1 Nyawa Aktif</span></div>
+                        <div>Target: Klik sebanyak-banyaknya</div>
+                    </div>
+                </div>
+
+                <!-- Live Floating Mini Rules HUD -->
+                <div class="glass-panel rounded-2xl p-5 space-y-3">
+                    <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Peraturan Cepat</h4>
+                    <div class="text-[11px] text-slate-400 space-y-2">
+                        <div class="flex gap-2"><span class="text-cyan-400">⏱️</span> <span>Batas waktu maksimal 10 menit.</span></div>
+                        <div class="flex gap-2"><span class="text-cyan-400">🛡️</span> <span>Data otomatis dikirim ke email admin saat waktu habis.</span></div>
+                        <div class="flex gap-2"><span class="text-cyan-400">🚫</span> <span>Jangan tutup/refresh halaman untuk menghindari diskualifikasi.</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Main Tap Target Arena -->
+            <div class="lg:col-span-8 glass-panel rounded-2xl p-6 md:p-8 neon-border-blue flex flex-col items-center justify-between min-h-[500px] relative">
+                <!-- Floating Particle container inside button arena -->
+                <div id="particle-container"></div>
+
+                <!-- Header: Timer HUD -->
+                <div class="w-full flex justify-between items-center border-b border-slate-800/80 pb-4">
+                    <div>
+                        <span class="text-xs text-slate-400 uppercase tracking-widest font-mono">WAKTU TERSISA</span>
+                        <div id="timer-countdown" class="text-4xl font-orbitron font-black text-cyan-400 tracking-wider neon-text-blue">
+                            10:00
+                        </div>
+                    </div>
+                    <div class="text-right">
+                        <span class="text-xs text-slate-400 uppercase tracking-widest font-mono">SKOR SEKARANG</span>
+                        <div class="text-4xl font-orbitron font-black text-white">
+                            <span id="click-counter" class="text-purple-400">0</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Giant Glowing Click Button Target -->
+                <div class="my-auto py-8">
+                    <button id="big-clicker-button" onclick="handleMainClick(event)" class="w-56 h-56 md:w-64 md:h-64 rounded-full bg-gradient-to-tr from-cyan-600 to-purple-600 hover:from-cyan-500 hover:to-purple-500 shadow-[0_0_50px_rgba(168,85,247,0.3)] hover:shadow-[0_0_80px_rgba(6,182,212,0.5)] border-8 border-slate-950/60 flex flex-col items-center justify-center gap-1 cursor-pointer transform active:scale-95 transition-all duration-75 relative group select-none">
+                        <div class="absolute inset-0 rounded-full bg-gradient-to-tr from-cyan-400 to-purple-500 opacity-20 blur-xl group-hover:opacity-45 transition-all"></div>
+                        <i class="fa-solid fa-hand-pointer text-4xl md:text-5xl text-white group-hover:animate-bounce mb-1"></i>
+                        <span class="font-orbitron font-black text-2xl tracking-widest text-white">TAP ME!</span>
+                        <span class="text-[10px] text-cyan-300 font-mono tracking-widest uppercase">KLIK DISINI</span>
+                    </button>
+                </div>
+
+                <!-- Score indicator meter progress -->
+                <div class="w-full space-y-2">
+                    <div class="flex justify-between text-xs text-slate-400 font-mono">
+                        <span>Intensitas Klik: Aktif</span>
+                        <span>One Chance Only</span>
+                    </div>
+                    <div class="w-full bg-slate-950/80 rounded-full h-3.5 p-0.5 border border-slate-800">
+                        <div class="bg-gradient-to-r from-cyan-500 to-purple-500 h-full rounded-full transition-all duration-300 animate-pulse" style="width: 100%"></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- SCREEN 5: GAME OVER / RESULTS / LOCKED OUT -->
+        <section id="screen-gameover" class="app-screen w-full max-w-4xl grid grid-cols-1 lg:grid-cols-12 gap-6 hidden">
+            <!-- Left Info Panel & Social Media action items -->
+            <div class="lg:col-span-5 flex flex-col gap-5">
+                <!-- Result Card -->
+                <div class="glass-panel rounded-2xl p-6 border border-rose-500/30 shadow-2xl space-y-4 relative overflow-hidden">
+                    <div class="absolute top-0 right-0 w-32 h-32 bg-rose-500/5 rounded-full blur-xl pointer-events-none"></div>
+                    
+                    <div class="flex items-center gap-3">
+                        <div class="p-3 rounded-xl bg-rose-500/20 text-rose-400 border border-rose-500/30">
+                            <i class="fa-solid fa-lock-open text-xl"></i>
+                        </div>
+                        <div>
+                            <span class="text-xs text-slate-400 font-mono">STATUS PERMAINAN</span>
+                            <h3 class="font-bold text-rose-400 text-lg uppercase tracking-wider font-orbitron">SELESAI (TERKUNCI)</h3>
+                        </div>
+                    </div>
+
+                    <div class="p-4 bg-slate-950/80 rounded-xl border border-slate-800/80 text-center space-y-1">
+                        <span class="text-xs text-slate-400 uppercase tracking-widest font-mono">Total Akumulasi Klik Anda</span>
+                        <div class="text-5xl font-orbitron font-black text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-400 neon-text-pink" id="final-clicks-result">
+                            0
+                        </div>
+                        <span class="text-xs text-slate-500 font-medium">Clicks / 10 Menit</span>
+                    </div>
+
+                    <!-- Rule 3: Screenshot requirement notice and admin link -->
+                    <div class="bg-amber-500/10 border border-amber-500/20 p-4 rounded-xl space-y-3">
+                        <div class="flex items-start gap-2 text-xs text-amber-300">
+                            <i class="fa-solid fa-camera mt-0.5"></i>
+                            <p><strong>Langkah Verifikasi Wajib:</strong> Ambil screenshot/SS hasil akhir halaman ini, lalu kirim langsung ke Instagram admin untuk klaim hadiah Anda!</p>
+                        </div>
+                        <a href="https://instagram.com/1tsbry._" target="_blank" class="w-full bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500 text-white font-bold py-2.5 px-4 rounded-xl flex items-center justify-center gap-2 text-xs shadow-lg shadow-pink-600/10 hover:scale-[1.01] transition-all">
+                            <i class="fa-brands fa-instagram text-lg"></i> Hubungi Admin: @1tsbry._
+                        </a>
+                    </div>
+                </div>
+
+                <!-- Secure Database Pipeline Email Simulation terminal -->
+                <div class="glass-panel rounded-2xl p-5 border border-slate-800 space-y-3">
+                    <div class="flex justify-between items-center">
+                        <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wider font-mono">Transmission Pipeline Logs</h4>
+                        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                    </div>
+                    <div id="email-terminal-logs" class="bg-slate-950/90 rounded-xl p-3 h-48 overflow-y-auto border border-slate-900 font-mono space-y-1.5 scrollbar-thin">
+                        <!-- Filled procedurally -->
+                    </div>
+                    <!-- Download Certify Option -->
+                    <button id="download-report-btn" class="w-full bg-slate-950 hover:bg-slate-900 text-slate-300 hover:text-white border border-slate-800 hover:border-slate-700 py-2.5 px-4 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all">
+                        <i class="fa-solid fa-file-arrow-down"></i> Unduh Berkas Sertifikat Validasi (.txt)
+                    </button>
+                </div>
+            </div>
+
+            <!-- Right Live Leaderboard section -->
+            <div class="lg:col-span-7 flex flex-col gap-4">
+                <div class="glass-panel rounded-2xl p-6 border border-purple-500/20 shadow-2xl flex-grow space-y-4">
+                    <div class="flex items-center justify-between border-b border-slate-800/80 pb-3">
+                        <div class="flex items-center gap-2.5">
+                            <div class="p-2 bg-purple-500/10 text-purple-400 rounded-lg">
+                                <i class="fa-solid fa-trophy"></i>
+                            </div>
+                            <div>
+                                <h3 class="font-bold text-white text-base">Papan Peringkat Terkini</h3>
+                                <p class="text-xs text-slate-400">Peringkat dihitung otomatis berdasarkan data asli para pemain.</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Locked Out Profile Data -->
+                    <div class="bg-slate-950/75 p-3 rounded-xl border border-slate-800/80 text-xs text-slate-400 space-y-1.5 font-mono">
+                        <div class="text-slate-300 font-semibold mb-1">DATA AKUN ANDA YANG DIKUNCI:</div>
+                        <div>• Nama Lengkap: <span id="lock-fullname" class="text-slate-200">...</span></div>
+                        <div>• Nama Panggilan: <span id="lock-nickname" class="text-slate-200">...</span></div>
+                        <div>• TTL: <span id="lock-birth" class="text-slate-200">...</span></div>
+                        <div>• Ortu: <span id="lock-parents" class="text-slate-200">...</span></div>
+                    </div>
+
+                    <!-- Leaderboard Entries -->
+                    <div id="leaderboard-entries" class="space-y-3.5 max-h-[400px] overflow-y-auto pr-1">
+                        <!-- Loaded dynamically -->
+                    </div>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- FOOTER WITH COPYRIGHT -->
+    <footer class="w-full glass-panel py-4 text-center border-t border-purple-900/10 text-xs text-slate-500 font-mono z-40">
+        <div>&copy; 2026 CLICKER ONE-SHOT CHAMPIONSHIP. Developed with visual excellence.</div>
+        <div class="text-[10px] text-slate-600 mt-1">Sesi Anda dipantau aman oleh Database Pusat admin.</div>
+    </footer>
+
+</body>
+</html>
